@@ -1,0 +1,40 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  balance       Float     @default(100.0)
+  trades        Trade[]
+  strategies    Strategy[]
+}
+
+model Trade {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  pair      String
+  type      String   // BUY or SELL
+  price     Float
+  amount    Float
+  timestamp DateTime @default(now())
+}
+
+model Strategy {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  pair      String
+  buyAt     Float?   // Price to trigger buy
+  sellAt    Float?   // Price to trigger sell
+  active    Boolean  @default(true)
+}
