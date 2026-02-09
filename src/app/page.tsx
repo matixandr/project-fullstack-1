@@ -78,6 +78,7 @@ export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [captchaError, setCaptchaError] = useState(false);
+  const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim();
   const [btcPrice, setBtcPrice] = useState(0);
   const [ethPrice, setEthPrice] = useState(0);
   const [candleData, setCandleData] = useState<any[]>([]);
@@ -274,23 +275,27 @@ export default function Dashboard() {
 
           <div className="mb-8 flex flex-col items-center justify-center w-full">
             <div className="bg-black/40 border border-border rounded-2xl p-4 w-full min-h-[100px] flex flex-col items-center justify-center gap-3">
-              <Turnstile
-                // Klucz testowy Cloudflare (wymusza interakcję, działa zawsze na localhost)
-                // Zmień na swój klucz w panelu Cloudflare dodając domenę "localhost"
-                siteKey="1x00000000000000000000AA"
-                options={{
-                  theme: 'dark',
-                  appearance: 'always',
-                }}
-                onSuccess={(token) => {
-                  setCaptchaToken(token);
-                  setCaptchaError(false);
-                }}
-                onError={() => {
-                  setCaptchaError(true);
-                  setCaptchaToken(null);
-                }}
-              />
+              {turnstileSiteKey ? (
+                <Turnstile
+                  siteKey={turnstileSiteKey}
+                  options={{
+                    theme: "dark",
+                    appearance: "always",
+                  }}
+                  onSuccess={(token) => {
+                    setCaptchaToken(token);
+                    setCaptchaError(false);
+                  }}
+                  onError={() => {
+                    setCaptchaError(true);
+                    setCaptchaToken(null);
+                  }}
+                />
+              ) : (
+                <span className="text-[10px] text-destructive font-bold uppercase tracking-widest text-center">
+                  Brak NEXT_PUBLIC_TURNSTILE_SITE_KEY
+                </span>
+              )}
 
               {!captchaToken && !captchaError && (
                 <span className="text-[10px] text-muted-foreground animate-pulse font-bold tracking-widest uppercase">
