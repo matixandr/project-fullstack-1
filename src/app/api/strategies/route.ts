@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
+import { getServerSession } from "next-auth";
 import { authOptions } from "../auth/[...nextauth]/route";
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 export async function POST(req: Request) {
   const session = await getServerSession(authOptions);
@@ -12,7 +10,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { pair, buyAt, sellAt } = await req.json();
+  const { pair, buyAt, sellAt, amount } = await req.json();
 
   const strategy = await prisma.strategy.create({
     data: {
@@ -20,6 +18,7 @@ export async function POST(req: Request) {
       pair,
       buyAt: buyAt ? parseFloat(buyAt) : null,
       sellAt: sellAt ? parseFloat(sellAt) : null,
+      amount: amount ? parseFloat(amount) : 0.001,
       active: true,
     },
   });
@@ -40,4 +39,3 @@ export async function GET() {
 
   return NextResponse.json(strategies);
 }
-

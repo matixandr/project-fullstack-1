@@ -1,12 +1,11 @@
 import NextAuth from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
-import { PrismaAdapter } from "@next-auth/prisma-adapter";
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { PrismaAdapter } from "@auth/prisma-adapter";
+import { prisma } from "@/lib/prisma";
 
 export const authOptions = {
-  adapter: PrismaAdapter(prisma),
+  adapter: PrismaAdapter(prisma) as any,
+  secret: process.env.NEXTAUTH_SECRET,
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
@@ -15,7 +14,10 @@ export const authOptions = {
   ],
   callbacks: {
     async signIn({ user }: { user: any }) {
-      return !!(user.email && user.email.endsWith("@technischools.com"));
+      const email = user.email?.toLowerCase().trim();
+      const allowed = !!(email && email.endsWith("@technischools.com"));
+      console.log(`SignIn attempt: ${email} - Allowed: ${allowed}`);
+      return allowed;
     },
     async session({ session, user }: { session: any; user: any }) {
       if (session.user) {
@@ -30,4 +32,3 @@ export const authOptions = {
 const handler = NextAuth(authOptions);
 
 export { handler as GET, handler as POST };
-

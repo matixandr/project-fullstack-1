@@ -1,5 +1,3 @@
-import type { Metadata } from "next";
-import "./globals.css";
 
 import type { Metadata } from "next";
 import { Providers } from "@/components/Providers";
@@ -16,7 +14,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" className="dark" suppressHydrationWarning>
       <body className="min-h-screen bg-background text-foreground antialiased selection:bg-primary/30">
         <Providers>
           {children}

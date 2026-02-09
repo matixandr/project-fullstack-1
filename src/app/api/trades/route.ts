@@ -1,9 +1,7 @@
- import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
+import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
 import { authOptions } from "../auth/[...nextauth]/route";
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 export async function POST(req: Request) {
   const session = await getServerSession(authOptions);
@@ -14,7 +12,7 @@ export async function POST(req: Request) {
 
   const { pair, type, price, amount } = await req.json();
 
-  const trade = await prisma.$transaction(async (tx) => {
+  const trade = await prisma.$transaction(async (tx: any) => {
     const trade = await tx.trade.create({
       data: {
         userId: (session.user as any).id,
@@ -56,4 +54,3 @@ export async function GET() {
 
   return NextResponse.json(trades);
 }
-

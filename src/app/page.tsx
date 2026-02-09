@@ -2,6 +2,8 @@
 
 import React, { useState, useEffect } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
+import dynamic from "next/dynamic";
+import { useRef } from "react";
 import {
   TrendingUp,
   Wallet,
@@ -19,25 +21,71 @@ import {
   Play,
   Square
 } from "lucide-react";
-import {
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  AreaChart,
-  Area
-} from "recharts";
+
+// Usuwam statyczny import 'Turnstile' i zostawiam tylko wersję dynamiczną
+// aby uniknąć błędu "the name Turnstile is defined multiple times"
+const Turnstile = dynamic(() => import("@marsidev/react-turnstile").then((mod) => mod.Turnstile), {
+  ssr: false,
+});
+
+// Dynamiczny import charta z osobnego pliku
+const CandleChart = dynamic(() => import("@/components/CandleChart"), {
+  ssr: false,
+  loading: () => <div className="w-full h-[350px] bg-muted/20 animate-pulse rounded-xl flex items-center justify-center text-muted-foreground">Ładowanie wykresu...</div>
+});
+
+// Helper function for RSI calculation
+function calculateRSI(prices: number[], period: number = 14): number[] {
+  if (prices.length < period + 1) return [];
+
+  const rsiArray: number[] = [];
+  let gains = 0;
+  let losses = 0;
+
+  // Calculate initial average gain/loss
+  for (let i = 1; i <= period; i++) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff > 0) gains += diff;
+    else losses -= diff;
+  }
+
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+
+  let rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+  let rsi = 100 - (100 / (1 + rs));
+  rsiArray.push(rsi);
+
+  // Calculate subsequent values using smoothed averages
+  for (let i = period + 1; i < prices.length; i++) {
+    const diff = prices[i] - prices[i - 1];
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? -diff : 0;
+
+    avgGain = ((avgGain * (period - 1)) + gain) / period;
+    avgLoss = ((avgLoss * (period - 1)) + loss) / period;
+
+    rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+    rsi = 100 - (100 / (1 + rs));
+    rsiArray.push(rsi);
+  }
+
+  return rsiArray;
+}
 
 export default function Dashboard() {
   const { data: session, status } = useSession();
   const [mounted, setMounted] = useState(false);
-  const [btcPrice, setBtcPrice] = useState(45000);
-  const [chartData, setChartData] = useState<any[]>([]);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaError, setCaptchaError] = useState(false);
+  const [btcPrice, setBtcPrice] = useState(0);
+  const [ethPrice, setEthPrice] = useState(0);
+  const [candleData, setCandleData] = useState<any[]>([]);
   const [userBalance, setUserBalance] = useState(100.00);
   const [trades, setTrades] = useState<any[]>([]);
   const [strategies, setStrategies] = useState<any[]>([]);
   const [newStrategy, setNewStrategy] = useState({ pair: "BTC", type: "BUY", targetPrice: 0, amount: 0 });
+  const lastTradeRef = useRef<number>(0); // Prevent double trading within same candle
 
   useEffect(() => {
     setMounted(true);
@@ -55,28 +103,102 @@ export default function Dashboard() {
         });
     }
 
-    // Simulate live market data and agent behavior
-    const interval = setInterval(() => {
-      const newPrice = 45000 + (Math.random() - 0.5) * 500;
-      setBtcPrice(newPrice);
+    const fetchPricesAndKlines = async () => {
+      try {
+        // Fetch current prices
+        const priceRes = await fetch("https://api.binance.com/api/v3/ticker/price?symbols=[%22BTCUSDT%22,%22ETHUSDT%22]");
+        const priceData = await priceRes.json();
 
-      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      setChartData(prev => [...prev.slice(-19), { time, price: newPrice }]);
+        const btc = parseFloat(priceData.find((item: any) => item.symbol === "BTCUSDT")?.price || "0");
+        const eth = parseFloat(priceData.find((item: any) => item.symbol === "ETHUSDT")?.price || "0");
 
-      // Simple Agent Logic
-      strategies.forEach(strat => {
-        if (strat.active) {
-          if (strat.type === "BUY" && newPrice <= strat.targetPrice) {
-            executeTrade(strat, newPrice);
-          } else if (strat.type === "SELL" && newPrice >= strat.targetPrice) {
-            executeTrade(strat, newPrice);
-          }
+        setBtcPrice(btc);
+        setEthPrice(eth);
+
+        // Fetch 1m Klines for chart
+        const klineRes = await fetch("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=100");
+        const klineData = await klineRes.json();
+
+        const formattedKlines = klineData.map((k: any) => ({
+          time: k[0] / 1000,
+          open: parseFloat(k[1]),
+          high: parseFloat(k[2]),
+          low: parseFloat(k[3]),
+          close: parseFloat(k[4]),
+        }));
+
+        setCandleData(formattedKlines);
+
+        // -- AUTOMATED BOT LOGIC --
+        // Calculate indicators
+        const closes = formattedKlines.map(k => k.close);
+        const rsi = calculateRSI(closes, 14);
+        const currentRSI = rsi[rsi.length - 1];
+
+        // Calculate current BTC holding from trade history
+        const btcPosition = trades
+          .filter(t => t.pair === "BTC")
+          .reduce((acc, t) => t.type === "BUY" ? acc + t.amount : acc - t.amount, 0);
+
+        if (currentRSI) {
+           // Strategy: RSI Mean Reversion
+           // Buy when Oversold (<30) and we don't have a position
+           // Sell when Overbought (>70) and we have a position
+
+           const tradeAmount = 0.002; // Fixed trade amount
+           const cost = tradeAmount * btc;
+
+           if (currentRSI < 30 && btcPosition < 0.01 && userBalance > cost) {
+              // Strong Buy signal
+              autoExecuteTrade("BTC", "BUY", btc, tradeAmount);
+           } else if (currentRSI > 70 && btcPosition >= tradeAmount) {
+              // Strong Sell signal
+              autoExecuteTrade("BTC", "SELL", btc, tradeAmount);
+           }
         }
-      });
-    }, 3000);
+
+        // Manual Agent Logic
+        strategies.forEach(strat => {
+          if (strat.active) {
+            const currentPrice = strat.pair === "BTC" ? btc : eth;
+            if (currentPrice > 0) {
+              if (strat.type === "BUY" && currentPrice <= strat.targetPrice) {
+                executeTrade(strat, currentPrice);
+              } else if (strat.type === "SELL" && currentPrice >= strat.targetPrice) {
+                executeTrade(strat, currentPrice);
+              }
+            }
+          }
+        });
+      } catch (error) {
+        console.error("Failed to fetch markets", error);
+      }
+    };
+
+    fetchPricesAndKlines();
+    const interval = setInterval(fetchPricesAndKlines, 60000); // 1 minute interval as requested
 
     return () => clearInterval(interval);
-  }, [strategies, userBalance]);
+  }, [strategies, userBalance, session, trades]);
+
+  const autoExecuteTrade = async (pair: string, type: string, price: number, amount: number) => {
+    // Avoid double trading in the same minute
+    if (Date.now() - lastTradeRef.current < 45000) return;
+
+    try {
+      const res = await fetch("/api/trades", {
+        method: "POST",
+        body: JSON.stringify({ pair, type, price, amount })
+      });
+      const data = await res.json();
+
+      setTrades(prev => [data, ...prev]);
+      const cost = price * amount;
+      setUserBalance(prev => type === "BUY" ? prev - cost : prev + cost);
+
+      lastTradeRef.current = Date.now();
+    } catch (e) {}
+  };
 
   const executeTrade = async (strat: any, price: number) => {
     const cost = strat.amount * price;
@@ -115,6 +237,7 @@ export default function Dashboard() {
           pair: newStrategy.pair,
           buyAt: newStrategy.type === "BUY" ? newStrategy.targetPrice : null,
           sellAt: newStrategy.type === "SELL" ? newStrategy.targetPrice : null,
+          amount: newStrategy.amount,
         })
       });
       const data = await res.json();
@@ -123,24 +246,83 @@ export default function Dashboard() {
     }
   };
 
+  const handleLogin = () => {
+    if (!captchaToken) {
+      return;
+    }
+    signIn("google");
+  };
+
   if (!mounted || status === "loading") return null;
 
   if (!session) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="bg-card p-10 rounded-2xl border border-border text-center max-w-sm w-full mx-4">
-          <div className="bg-primary/20 p-4 rounded-full w-20 h-20 flex items-center justify-center mx-auto mb-6">
+      <div className="flex min-h-screen items-center justify-center bg-background p-4 leading-none">
+        <div className="bg-card p-10 rounded-3xl border border-border text-center max-w-sm w-full shadow-[0_0_50px_-12px_rgba(59,130,246,0.3)] relative overflow-hidden">
+          {/* Decorative element */}
+          <div className="absolute top-0 left-0 w-full h-1 bg-linear-to-r from-transparent via-primary to-transparent opacity-50" />
+
+          <div className="bg-primary/20 p-4 rounded-2xl w-20 h-20 flex items-center justify-center mx-auto mb-6 border border-primary/30">
             <Cpu className="text-primary w-10 h-10" />
           </div>
-          <h1 className="text-2xl font-bold mb-2">Welcome to CRYPTO.AI</h1>
-          <p className="text-muted-foreground mb-8">Login with your @technischools.com account to start trading.</p>
+
+          <h1 className="text-3xl font-black mb-2 tracking-tight text-foreground">CRYPTO.AI</h1>
+          <p className="text-muted-foreground mb-8 text-sm leading-relaxed">
+            Wymagana weryfikacja konta <br />
+            <span className="text-primary font-bold">@technischools.com</span>
+          </p>
+
+          <div className="mb-8 flex flex-col items-center justify-center w-full">
+            <div className="bg-black/40 border border-border rounded-2xl p-4 w-full min-h-[100px] flex flex-col items-center justify-center gap-3">
+              <Turnstile
+                // Klucz testowy Cloudflare (wymusza interakcję, działa zawsze na localhost)
+                // Zmień na swój klucz w panelu Cloudflare dodając domenę "localhost"
+                siteKey="1x00000000000000000000AA"
+                options={{
+                  theme: 'dark',
+                  appearance: 'always',
+                }}
+                onSuccess={(token) => {
+                  setCaptchaToken(token);
+                  setCaptchaError(false);
+                }}
+                onError={() => {
+                  setCaptchaError(true);
+                  setCaptchaToken(null);
+                }}
+              />
+
+              {!captchaToken && !captchaError && (
+                <span className="text-[10px] text-muted-foreground animate-pulse font-bold tracking-widest uppercase">
+                  Oczekiwanie na weryfikację...
+                </span>
+              )}
+            </div>
+
+            {captchaError && (
+              <div className="mt-3 p-2 bg-destructive/10 rounded-lg w-full">
+                <p className="text-[10px] text-destructive font-bold uppercase tracking-tight">
+                  Błąd połączenia z Cloudflare.
+                </p>
+              </div>
+            )}
+          </div>
+
           <button
-            onClick={() => signIn("google")}
-            className="w-full bg-primary text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-primary/90 transition-all"
+            onClick={handleLogin}
+            disabled={!captchaToken}
+            className="w-full bg-primary text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-primary/90 hover:shadow-[0_0_20px_rgba(59,130,246,0.5)] transition-all active:scale-95 disabled:opacity-20 disabled:grayscale disabled:cursor-not-allowed group"
           >
-            <LogIn size={20} />
-            Login with Google
+            <LogIn size={20} className="group-hover:translate-x-1 transition-transform" />
+            Zaloguj przez Google
           </button>
+
+          <div className="mt-8 pt-6 border-t border-border flex items-center justify-center gap-2">
+            <div className="w-1.5 h-1.5 bg-success rounded-full animate-pulse" />
+            <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-widest">
+              System Secure-Auth Active
+            </span>
+          </div>
         </div>
       </div>
     );
@@ -186,9 +368,15 @@ export default function Dashboard() {
         <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           <StatCard
             label="BTC/USDT"
-            value={`$${btcPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-            trend={btcPrice > 45000 ? "up" : "down"}
+            value={btcPrice > 0 ? `$${btcPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Loading..."}
+            trend={btcPrice > 0 ? "up" : undefined}
             icon={<LineChartIcon className="text-primary" size={24} />}
+          />
+          <StatCard
+            label="ETH/USDT"
+            value={ethPrice > 0 ? `$${ethPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Loading..."}
+            trend={ethPrice > 0 ? "up" : undefined}
+            icon={<TrendingUp className="text-blue-400" size={24} />}
           />
           <StatCard
             label="User Balance"
@@ -216,29 +404,12 @@ export default function Dashboard() {
             <div className="bg-card border border-border rounded-2xl p-6">
               <div className="flex items-center justify-between mb-8">
                 <div>
-                  <h2 className="text-xl font-bold">Bitcoin Live Feed</h2>
-                  <p className="text-sm text-muted-foreground">Real-time market analysis</p>
+                  <h2 className="text-xl font-bold">Bitcoin Live Chart (1m)</h2>
+                  <p className="text-sm text-muted-foreground italic text-primary animate-pulse">Bot is analyzing candles every 60s...</p>
                 </div>
               </div>
-              <div className="h-87.5 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chartData}>
-                    <defs>
-                      <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="var(--color-primary)" stopOpacity={0.3}/>
-                        <stop offset="95%" stopColor="var(--color-primary)" stopOpacity={0}/>
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#27272a" />
-                    <XAxis dataKey="time" stroke="#71717a" fontSize={12} tickLine={false} axisLine={false} />
-                    <YAxis domain={['auto', 'auto']} stroke="#71717a" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(val) => `$${(val/1000).toFixed(1)}k`} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "#18181b", border: "1px solid #27272a", borderRadius: "8px" }}
-                      itemStyle={{ color: "#fafafa" }}
-                    />
-                    <Area isAnimationActive={false} type="monotone" dataKey="price" stroke="var(--color-primary)" strokeWidth={2} fillOpacity={1} fill="url(#colorPrice)" />
-                  </AreaChart>
-                </ResponsiveContainer>
+              <div className="h-[350px] w-full">
+                <CandleChart data={candleData} />
               </div>
             </div>
 
@@ -300,8 +471,13 @@ export default function Dashboard() {
                   </div>
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-muted-foreground uppercase">Pair</label>
-                    <select className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:ring-1 ring-primary outline-none">
-                      <option>BTC/USDT</option>
+                    <select
+                      value={newStrategy.pair}
+                      onChange={e => setNewStrategy({...newStrategy, pair: e.target.value})}
+                      className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:ring-1 ring-primary outline-none"
+                    >
+                      <option value="BTC">BTC/USDT</option>
+                      <option value="ETH">ETH/USDT</option>
                     </select>
                   </div>
                 </div>
